@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Герои и Орки — пошаговая артиллерия</title>
+<style>
+  html,body{
+    margin:0;height:100%;background:#05070c;overflow:hidden;
+    font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+    -webkit-user-select:none;user-select:none;
+  }
+  #wrap{
+    position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    padding:10px;box-sizing:border-box;
+    background:radial-gradient(circle at 50% 40%, #101828 0%, #05070c 70%);
+  }
+  canvas{
+    display:block;max-width:100%;max-height:100%;
+    border-radius:12px;
+    box-shadow:0 0 70px rgba(90,140,255,.18), 0 0 0 1px rgba(120,170,255,.15);
+    cursor:crosshair;
+  }
+  #overlay{
+    position:fixed;inset:0;z-index:10;display:flex;
+    align-items:center;justify-content:center;
+    background:rgba(4,6,12,.82);backdrop-filter:blur(7px);
+    color:#e8eefc;text-align:center;padding:20px;box-sizing:border-box;
+  }
+  #overlay.hidden{display:none}
+  .panel{max-width:640px}
+  h1{
+    margin:0 0 10px;font-size:clamp(26px,5vw,46px);letter-spacing:1px;
+    background:linear-gradient(180deg,#ffe9a8,#e8a44a);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    text-shadow:0 0 40px rgba(255,180,80,.25);
+  }
+  h1.win{background:linear-gradient(180deg,#b6ffb0,#4fbf5a);-webkit-background-clip:text;background-clip:text}
+  .sub{margin:0 0 26px;font-size:clamp(14px,1.6vw,17px);color:#9fb0cc;line-height:1.6}
+  .btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-bottom:22px}
+  button{
+    font:inherit;font-size:17px;font-weight:600;padding:14px 30px;border-radius:12px;
+    border:1px solid rgba(140,180,255,.35);cursor:pointer;color:#eaf2ff;
+    background:linear-gradient(180deg,rgba(70,110,200,.45),rgba(40,60,120,.45));
+    transition:transform .12s, box-shadow .12s, background .12s;
+  }
+  button:hover{
+    transform:translateY(-2px);
+    background:linear-gradient(180deg,rgba(95,145,255,.6),rgba(50,80,160,.6));
+    box-shadow:0 8px 26px rgba(80,130,255,.35);
+  }
+  button:active{transform:translateY(0)}
+  .hint{margin:0;font-size:13px;color:#6d7f9c;line-height:1.9}
+  .hint b{color:#a8bcd8;font-weight:600}
+</style>
+</head>
+<body>
+
+<div id="wrap">
+  <canvas id="game" width="1280" height="720"></canvas>
+</div>
+
+<div id="overlay"></div>
+
+<script>
+"use strict";
+/* ============================================================
+   ГЕРОИ И ОРКИ — пошаговая артиллерия в фэнтези-сеттинге
+   Vanilla JS + Canvas 2D. Без зависимостей.
+   ============================================================ */
+
+const W = 1280, H = 720;
+const cvs = document.getElementById('game');
+const ctx = cvs.getContext('2d');
+const overlay = document.getElementById('overlay');
+
+/* ---------- утилиты ---------- */
+const rand  = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+const dist  = (x1, y1, x2, y2) => Math.hypot(x1 - x2, y1 - y2);
+
+function roundRect(c, x, y, w, h, r) {
+  r = Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2);
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y,     x + w, y + h, r);
+  c.arcTo(x + w, y + h, x,     y + h, r);
+  c.arcTo(x,     y + h, x,     y,     r);
+  c.arcTo(x,     y,     x + w, y,     r);
+  c.closePath();
+}
+
+/* ---------- данные классов и оружия ---------- */
+const CLASSES = {
+  mage:    { name: 'Маг',     icon: '🧙', hp: 100, weapon: 'fireball' },
+  ranger:  { name: 'Лучник',  icon: '🏹', hp: 90,  weapon: 'arrow'    },
+  warrior: { name: 'Варвар',  icon: '🪓', hp: 130, weapon: 'axe'      }
+};
+
+const WEAPONS = {
+  fireball: { name: 'Огненный шар',   r: 48, dmg: 52, grav: 0.30, speedMul: 1.00, c1: '#ff8a2a' },
+  arrow:    { name: 'Стрела',         r: 16, dmg: 30, grav: 0.16, speedMul: 1.35, c1: '#cfe6ff' },
+  axe:      { name: 'Метательный топор', r: 34, dmg: 40, grav: 0.36, speedMul: 0.95, c1: '#b9c4d0' }
+};
+
+const TEAM_COLOR = ['#4a9eff', '#ff5a5a'];
+const TEAM_NAME  = ['Синие',   'Красные'];
+
+/* ---------- состояние ---------- */
+const terrain = new Float32Array(W);      // высота поверхности по колонкам
+let terrainDirty = true;
+
+const terrCvs = document.createElement('canvas');
+terrCvs.width = W; terrCvs.height = H;
+const tctx = terrCvs.getContext('2d');
+
+let units = [];          // плоский список
+let order = [];          // порядок ходов
+let turnIdx = 0;
+
+let state = 'menu';      // menu | aim | flying | resolve | over
+let projectile = null;
+let particles = [];
+let rings = [];
+let floats = [];
+let shake = 0;
+let tick = 0;
+
+let wind = 0;
+let windForce = 0;
+
+let aimAngle = -0.7;
+let aimPower = 50;
+let charging = false;
+
+let vsAI = false;
+let aiPlan = null;
+let aiTimer = 0;
+let resolveTimer = 0;
+
+let gameRunning = false;
+
+/* ---------- фон ---------- */
+let stars = [];
+let mountains = [];
+
+function genBackground() {
+  stars = [];
+  for (let i = 0; i < 190; i++) {
+    stars.push({
+      x: rand(0, W), y: rand(0, H * 0.62),
+      r: rand(0.7, 2.2), a: rand(0.15, 0.95)
+    });
+  }
+  mountains = [];
+  for (let layer = 0; layer < 2; layer++) {
+    const pts = [];
+    let y = H * (0.44 + layer * 0.09);
+    for (let x = -60; x <= W + 60; x += 46) {
+      y += rand(-34, 34);
+      y = clamp(y, H * (0.22 + layer * 0.10), H * (0.60 + layer * 0.05));
+      pts.push([x, y]);
+    }
+    mountains.push(pts);
+  }
+}
+
+/* ---------- генерация ландшафта ---------- */
+function genTerrain() {
+  const p1 = rand(0, 6.28), p2 = rand(0, 6.28), p3 = rand(0, 6.28), p4 = rand(0, 6.28);
+  const a1 = rand(50, 105), a2 = rand(18, 44), a3 = rand(7, 18);
+
+  for (let x = 0; x < W; x++) {
+    const t = x / W;
+    let y = H * 0.52
+      + Math.sin(t * 6.283 * 1.3 + p1) * a1
+      + Math.sin(t * 6.283 * 2.9 + p2) * a2
+      + Math.sin(t * 6.283 * 7.1 + p3) * a3
+      + Math.sin(t * 6.283 * 13.3 + p4) * 6;
+    terrain[x] = clamp(y, 230, H - 60);
+  }
+  // сглаживание
+  for (let k = 0; k < 2; k++) {
+    const copy = Float32Array.from(terrain);
+    for (let x = 1; x < W - 1; x++) {
+      terrain[x] = (copy[x - 1] + copy[x] * 2 + copy[x + 1]) / 4;
+    }
+  }
+}
+
+function rebuildTerrain() {
+  tctx.clearRect(0, 0, W, H);
+
+  // тело земли
+  tctx.beginPath();
+  tctx.moveTo(0, H);
+  for (let x = 0; x < W; x++) tctx.lineTo(x, terrain[x]);
+  tctx.lineTo(W, H);
+  tctx.closePath();
+
+  const g = tctx.createLinearGradient(0, 180, 0, H);
+  g.addColorStop(0,    '#5b4632');
+  g.addColorStop(0.14, '#43331f');
+  g.addColorStop(0.55, '#2b2015');
+  g.addColorStop(1,    '#150e08');
+  tctx.fillStyle = g;
+  tctx.fill();
+
+  // текстура (крапинки внутри земли)
+  tctx.save();
+  tctx.clip();
+  for (let i = 0; i < 700; i++) {
+    const x = Math.random() * W;
+    const y = rand(200, H);
+    tctx.fillStyle = `rgba(0,0,0,${rand(0.04, 0.18)})`;
+    tctx.fillRect(x, y, rand(2, 7), rand(2, 7));
+  }
+  for (let i = 0; i < 260; i++) {
+    const x = Math.random() * W;
+    const y = rand(220, H);
+    tctx.fillStyle = `rgba(140,110,70,${rand(0.03, 0.10)})`;
+    tctx.fillRect(x, y, rand(2, 5), rand(2, 5));
+  }
+  tctx.restore();
+
+  // травяная кромка
+  tctx.beginPath();
+  tctx.moveTo(0, terrain[0]);
+  for (let x = 1; x < W; x++) tctx.lineTo(x, terrain[x]);
+  tctx.lineJoin = 'round';
+  tctx.lineCap = 'round';
+  tctx.lineWidth = 10;
+  tctx.strokeStyle = '#33581f';
+  tctx.stroke();
+  tctx.lineWidth = 4.5;
+  tctx.strokeStyle = '#6aa844';
+  tctx.stroke();
+
+  terrainDirty = false;
+}
+
+/* ---------- создание отрядов ---------- */
+function placeUnits() {
+  units = [];
+  const types = ['mage', 'ranger', 'warrior'];
+
+  for (let team = 0; team < 2; team++) {
+    for (let i = 0; i < 3; i++) {
+      const frac = (i + 0.5) / 3;
+      const x = team === 0
+        ? 95 + frac * 240 + rand(-22, 22)
+        : W - 95 - frac * 240 + rand(-22, 22);
+      const c = CLASSES[types[i]];
+      units.push({
+        team, cls: types[i], icon: c.icon, name: c.name,
+        weapon: c.weapon,
+        hp: c.hp, maxHp: c.hp, alive: true,
+        x, y: terrain[clamp(Math.round(x), 0, W - 1)], vy: 0
+      });
+    }
+  }
+
+  order = [];
+  for (let i = 0; i < 3; i++) order.push(units[i], units[i + 3]);
+}
+
+/* ---------- ходы ---------- */
+const currentUnit = () => order[turnIdx];
+const isAITurn    = () => vsAI && currentUnit() && currentUnit().team === 1;
+
+function nextTurn() {
+  if (state === 'over') return;
+  if (checkOver()) return;
+
+  let guard = 0;
+  do {
+    turnIdx = (turnIdx + 1) % order.length;
+    guard++;
+  } while (!order[turnIdx].alive && guard < 100);
+
+  wind = rand(-1, 1);
+  windForce = wind * 0.11;
+
+  const u = currentUnit();
+  aimAngle = u.team === 0 ? -0.7 : Math.PI + 0.7;
+  aimPower = 50;
+  charging = false;
+  state = 'aim';
+
+  if (vsAI && u.team === 1) startAI();
+}
+
+function checkOver() {
+  const a = units.some(u => u.alive && u.team === 0);
+  const b = units.some(u => u.alive && u.team === 1);
+  if (!a || !b) {
+    state = 'over';
+    const winner = !a ? 1 : 0;
+    setTimeout(() => showGameOver(winner), 1100);
+    return true;
+  }
+  return false;
+}
+
+/* ---------- выстрел ---------- */
+function fire() {
+  const u = currentUnit();
+  if (!u || !u.alive) return;
+  const w = WEAPONS[u.weapon];
+  const sp = (4 + aimPower * 0.18) * w.speedMul;
+
+  projectile = {
+    x: u.x, y: u.y - 24,
+    vx: Math.cos(aimAngle) * sp,
+    vy: Math.sin(aimAngle) * sp,
+    type: u.weapon, owner: u, trail: []
+  };
+
+  state = 'flying';
+  charging = false;
+  aimPower = 0;
+}
+
+/* ---------- физика снаряда ---------- */
+function stepProjectile() {
+  const p = projectile;
+  const w = WEAPONS[p.type];
+  const SUB = 4;
+
+  p.trail.push({ x: p.x, y: p.y });
+  if (p.trail.length > 14) p.trail.shift();
+
+  for (let s = 0; s < SUB; s++) {
+    p.vy += w.grav / SUB;
+    p.vx += windForce / SUB;
+    p.x += p.vx / SUB;
+    p.y += p.vy / SUB;
+
+    // вылет за пределы
+    if (p.x < -320 || p.x > W + 320 || p.y > H + 600) {
+      projectile = null;
+      endShot();
+      return;
+    }
+
+    // столкновение с землёй
+    if (p.x >= 0 && p.x < W) {
+      const gx = terrain[p.x | 0];
+      if (p.y >= gx) {
+        boom(p.x, gx, p.type);
+        projectile = null;
+        endShot();
+        return;
+      }
+    }
+
+    // столкновение с бойцами
+    for (const u of units) {
+      if (!u.alive || u === p.owner) continue;
+      if (dist(p.x, p.y, u.x, u.y - 22) < 16) {
+        boom(p.x, p.y, p.type);
+        projectile = null;
+        endShot();
+        return;
+      }
+    }
+  }
+}
+
+function endShot() {
+  state = 'resolve';
+  resolveTimer = 62;
+}
+
+/* ---------- взрыв ---------- */
+function carve(cx, cy, r) {
+  const x0 = Math.max(0, Math.floor(cx - r));
+  const x1 = Math.min(W - 1, Math.ceil(cx + r));
+  for (let x = x0; x <= x1; x++) {
+    const dx = x - cx;
+    const d2 = r * r - dx * dx;
+    if (d2 <= 0) continue;
+    const bottom = cy + Math.sqrt(d2);
+    if (terrain[x] < bottom) terrain[x] = Math.min(H - 6, bottom);
+  }
+  terrainDirty = true;
+}
+
+function boom(x, y, type) {
+  const w = WEAPONS[type];
+
+  carve(x, y, w.r);
+
+  shake = Math.min(20, w.r * 0.42);
+  rings.push({ x, y, r: w.r * 0.35, max: w.r * 2.1, life: 1 });
+
+  for (let i = 0; i < 30 + w.r * 0.7; i++) {
+    const a = rand(0, 6.283), s = rand(1, 7.5);
+    particles.push({
+      x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 2,
+      life: 1, decay: rand(0.014, 0.036),
+      size: rand(2, 6.5), color: w.c1
+    });
+  }
+  for (let i = 0; i < 14; i++) {
+    const a = rand(0, 6.283), s = rand(0.5, 4);
+    particles.push({
+      x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 1.5,
+      life: 1, decay: rand(0.008, 0.018),
+      size: rand(4, 10), color: '#4a3a28'
+    });
+  }
+
+  const R = w.r * 1.45;
+  for (const u of units) {
+    if (!u.alive) continue;
+    const d = dist(x, y, u.x, u.y - 22);
+    if (d < R) {
+      let dmg = w.dmg * Math.pow(1 - d / R, 0.85);
+      dmg = Math.max(6, Math.round(dmg));
+      u.hp -= dmg;
+      floats.push({
+        x: u.x + rand(-6, 6), y: u.y - 48,
+        text: '-' + dmg, life: 1, color: '#ff9b7b'
+      });
+      if (u.hp <= 0) {
+        u.hp = 0;
+        u.alive = false;
+        for (let i = 0; i < 26; i++) {
+          const a = rand(0, 6.283), s = rand(1, 6);
+          particles.push({
+            x: u.x, y: u.y - 22,
+            vx: Math.cos(a) * s, vy: Math.sin(a) * s - 2,
+            life: 1, decay: rand(0.012, 0.03),
+            size: rand(2, 5), color: '#ff5555'
+          });
+        }
+      }
+    }
+  }
+}
+
+/* ---------- ИИ ---------- */
+function simulateShot(u, ang, pw) {
+  const w = WEAPONS[u.weapon];
+  const sp = (4 + pw * 0.18) * w.speedMul;
+  let x = u.x, y = u.y - 24;
+  let vx = Math.cos(ang) * sp, vy = Math.sin(ang) * sp;
+
+  for (let i = 0; i < 1200; i++) {
+    vy += w.grav;
+    vx += windForce;
+    x += vx; y += vy;
+    if (x < -220 || x > W + 220 || y > H + 300) return null;
+    if (x >= 0 && x < W && y >= terrain[x | 0]) return { x, y };
+  }
+  return null;
+}
+
+function computeAIShot(u) {
+  const enemies = units.filter(e => e.alive && e.team !== u.team);
+  const right = u.team === 0;
+  let best = null;
+
+  for (let i = 0; i < 240; i++) {
+    const base = rand(-1.45, 0.25);
+    const ang = right ? base : Math.PI - base;
+    const pw = rand(20, 100);
+    const res = simulateShot(u, ang, pw);
+    if (!res) continue;
+
+    let dmin = 1e9;
+    for (const e of enemies) dmin = Math.min(dmin, dist(res.x, res.y, e.x, e.y - 22));
+    // избегаем своих
+    for (const f of units) {
+      if (!f.alive || f.team !== u.team || f === u) continue;
+      const d = dist(res.x, res.y, f.x, f.y - 22);
+      if (d < 70) dmin += (70 - d) * 2.5;
+    }
+    if (!best || dmin < best.d) best = { d: dmin, ang, pw };
+  }
+
+  if (!best) best = { ang: right ? -0.8 : Math.PI + 0.8, pw: 62 };
+
+  return {
+    ang: best.ang + rand(-0.022, 0.022),
+    pw: clamp(best.pw * rand(0.955, 1.045), 15, 100)
+  };
+}
+
+function startAI() {
+  const u = currentUnit();
+  aiPlan = computeAIShot(u);
+  aimAngle = aiPlan.ang;
+  aimPower = aiPlan.pw;
+  aiTimer = 52;
+}
+
+/* ---------- обновление ---------- */
+function update() {
+  tick++;
+
+  if (shake > 0.25) shake *= 0.90; else shake = 0;
+
+  // частицы
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.vy += 0.19;
+    p.vx *= 0.985;
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  // кольца
+  for (let i = rings.length - 1; i >= 0; i--) {
+    const r = rings[i];
+    r.r += (r.max - r.r) * 0.18;
+    r.life -= 0.045;
+    if (r.life <= 0) rings.splice(i, 1);
+  }
+  // всплывающий текст
+  for (let i = floats.length - 1; i >= 0; i--) {
+    const f = floats[i];
+    f.y -= 0.75;
+    f.life -= 0.014;
+    if (f.life <= 0) floats.splice(i, 1);
+  }
+
+  // гравитация бойцов (падение после разрушения земли)
+  for (const u of units) {
+    if (!u.alive) continue;
+    const gy = terrain[clamp(Math.round(u.x), 0, W - 1)];
+    if (u.y < gy - 0.5) {
+      u.vy += 0.55;
+      u.y += u.vy;
+      if (u.y >= gy) { u.y = gy; u.vy = 0; }
+    } else {
+      u.y = gy;
+      u.vy = 0;
+    }
+  }
+
+  // заряд силы
+  if (charging && state === 'aim' && !isAITurn()) {
+    aimPower = Math.min(100, aimPower + 2.25);
+  }
+
+  // снаряд
+  if (projectile) stepProjectile();
+
+  // ИИ целится и стреляет
+  if (aiPlan && state === 'aim') {
+    aiTimer--;
+    if (aiTimer <= 0) { aiPlan = null; fire(); }
+  }
+
+  // разрешение хода
+  if (state === 'resolve') {
+    resolveTimer--;
+    const settled = units.every(u =>
+      !u.alive || Math.abs(u.y - terrain[clamp(Math.round(u.x), 0, W - 1)]) < 1.2
+    );
+    if (resolveTimer <= 0 && settled) nextTurn();
+  }
+}
+
+/* ---------- отрисовка ---------- */
+function drawSky() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0,    '#0a0f22');
+  g.addColorStop(0.42, '#1b2745');
+  g.addColorStop(0.72, '#453555');
+  g.addColorStop(1,    '#8a5545');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const s of stars) {
+    ctx.globalAlpha = s.a;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(s.x, s.y, s.r, s.r);
+  }
+  ctx.globalAlpha = 1;
+
+  // луна
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,240,200,.75)';
+  ctx.shadowBlur = 70;
+  ctx.beginPath();
+  ctx.arc(1075, 112, 44, 0, 7);
+  ctx.fillStyle = 'rgba(255,246,224,.94)';
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawMountains() {
+  const colors = ['#141c30', '#1d2740'];
+  for (let l = 0; l < mountains.length; l++) {
+    const pts = mountains[l];
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], H);
+    for (const p of pts) ctx.lineTo(p[0], p[1]);
+    ctx.lineTo(pts[pts.length - 1][0], H);
+    ctx.closePath();
+    ctx.fillStyle = colors[l];
+    ctx.fill();
+  }
+}
+
+function drawUnits() {
+  const cur = currentUnit();
+  const t = tick * 0.11;
+
+  for (const u of units) {
+    if (!u.alive) continue;
+
+    // тень
+    ctx.globalAlpha = 0.32;
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.ellipse(u.x, u.y + 1, 16, 5, 0, 0, 7);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    const col = TEAM_COLOR[u.team];
+
+    // ореол текущего бойца
+    if (u === cur && (state === 'aim' || state === 'flying')) {
+      const pulse = 0.5 + Math.sin(t) * 0.5;
+      ctx.beginPath();
+      ctx.arc(u.x, u.y - 24, 24 + pulse * 4, 0, 7);
+      ctx.strokeStyle = `rgba(255,212,94,${0.35 + pulse * 0.45})`;
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+
+    // тело
+    ctx.beginPath();
+    ctx.arc(u.x, u.y - 24, 17, 0, 7);
+    ctx.fillStyle = '#1b2230';
+    ctx.fill();
+    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = col;
+    ctx.stroke();
+
+    // иконка класса
+    ctx.font = '19px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(u.icon, u.x, u.y - 23);
+
+    // полоса здоровья
+    const bw = 40, bh = 5, bx = u.x - bw / 2, by = u.y - 50;
+    ctx.fillStyle = 'rgba(0,0,0,.62)';
+    roundRect(ctx, bx - 1, by - 1, bw + 2, bh + 2, 3);
+    ctx.fill();
+    const hpFrac = Math.max(0, u.hp / u.maxHp);
+    ctx.fillStyle = hpFrac > 0.5 ? '#5ad06a' : hpFrac > 0.25 ? '#e8c33a' : '#e05050';
+    roundRect(ctx, bx, by, bw * hpFrac, bh, 2.5);
+    ctx.fill();
+
+    // маркер хода
+    if (u === cur && state !== 'over') {
+      const bob = Math.sin(t * 1.4) * 4;
+      ctx.beginPath();
+      ctx.moveTo(u.x - 9, u.y - 66 + bob);
+      ctx.lineTo(u.x + 9, u.y - 66 + bob);
+      ctx.lineTo(u.x,     u.y - 53 + bob);
+      ctx.closePath();
+      ctx.fillStyle = '#ffd45e';
+      ctx.shadowColor = 'rgba(255,212,94,.8)';
+      ctx.shadowBlur = 14;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+  }
+}
+
+function drawAim() {
+  if (state !== 'aim') return;
+  const u = currentUnit();
+  if (!u || !u.alive) return;
+
+  const ox = u.x, oy = u.y - 24;
+  const len = 34 + aimPower * 1.05;
+  const ex = ox + Math.cos(aimAngle) * len;
+  const ey = oy + Math.sin(aimAngle) * len;
+
+  // линия прицела
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,225,150,.85)';
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.shadowColor = 'rgba(255,200,90,.8)';
+  ctx.shadowBlur = 10;
+  ctx.beginPath();
+  ctx.moveTo(ox + Math.cos(aimAngle) * 20, oy + Math.sin(aimAngle) * 20);
+  ctx.lineTo(ex, ey);
+  ctx.stroke();
+
+  // наконечник
+  const ah = 10;
+  ctx.beginPath();
+  ctx.moveTo(ex, ey);
+  ctx.lineTo(ex - Math.cos(aimAngle - 0.42) * ah, ey - Math.sin(aimAngle - 0.42) * ah);
+  ctx.lineTo(ex - Math.cos(aimAngle + 0.42) * ah, ey - Math.sin(aimAngle + 0.42) * ah);
+  ctx.closePath();
+  ctx.fillStyle = '#ffd45e';
+  ctx.fill();
+  ctx.restore();
+
+  // короткая подсказка траектории
+  const w = WEAPONS[u.weapon];
+  const sp = (4 + aimPower * 0.18) * w.speedMul;
+  let x = ox, y = oy;
+  let vx = Math.cos(aimAngle) * sp, vy = Math.sin(aimAngle) * sp;
+
+  for (let i = 0; i < 22; i++) {
+    vy += w.grav;
+    vx += windForce;
+    x += vx; y += vy;
+    if (x < 0 || x >= W || y >= H) break;
+    if (y >= terrain[x | 0]) break;
+    if (i % 2 === 0) {
+      const a = 0.5 * (1 - i / 22);
+      ctx.beginPath();
+      ctx.arc(x, y, 2.2, 0, 7);
+      ctx.fillStyle = `rgba(255,240,180,${a})`;
+      ctx.fill();
+    }
+  }
+}
+
+function drawProjectile() {
+  if (!projectile) return;
+  const p = projectile;
+  const w = WEAPONS[p.type];
+
+  // след
+  for (let i = 0; i < p.trail.length; i++) {
+    const tp = p.trail[i];
+    const a = (i / p.trail.length) * 0.7;
+    ctx.beginPath();
+    ctx.arc(tp.x, tp.y, 1.5 + i * 0.32, 0, 7);
+    ctx.fillStyle = `rgba(255,220,150,${a})`;
+    ctx.fill();
+  }
+
+  // снаряд
+  ctx.save();
+  ctx.shadowColor = w.c1;
+  ctx.shadowBlur = 26;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, p.type === 'arrow' ? 5 : 7, 0, 7);
+  ctx.fillStyle = '#fff6d8';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, p.type === 'arrow' ? 8 : 11, 0, 7);
+  ctx.fillStyle = w.c1;
+  ctx.globalAlpha = 0.45;
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawEffects() {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, 7);
+    ctx.fill();
+  }
+  for (const r of rings) {
+    ctx.globalAlpha = Math.max(0, r.life) * 0.65;
+    ctx.strokeStyle = '#ffd08a';
+    ctx.lineWidth = 4 * r.life + 1;
+    ctx.beginPath();
+    ctx.arc(r.x, r.y, r.r, 0, 7);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // урон
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const f of floats) {
+    ctx.globalAlpha = Math.max(0, Math.min(1, f.life * 1.4));
+    ctx.font = 'bold 22px "Segoe UI",sans-serif';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0,0,0,.8)';
+    ctx.strokeText(f.text, f.x, f.y);
+    ctx.fillStyle = f.color;
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ---------- HUD ---------- */
+function drawTeamPanel(team, x0) {
+  const list = units.filter(u => u.team === team);
+  const dir = team === 0 ? 1 : -1;
+  const cur = currentUnit();
+
+  list.forEach((u, i) => {
+    const x = x0 + dir * (i * 56);
+    const y = 34;
+
+    ctx.globalAlpha = u.alive ? 1 : 0.28;
+
+    ctx.beginPath();
+    ctx.arc(x, y, 18, 0, 7);
+    ctx.fillStyle = team === 0 ? 'rgba(74,158,255,.16)' : 'rgba(255,90,90,.16)';
+    ctx.fill();
+
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = (u === cur && state !== 'over')
+      ? '#ffd45e'
+      : TEAM_COLOR[team];
+    ctx.stroke();
+
+    ctx.font = '18px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    ctx.fillText(u.icon, x, y + 1);
+
+    const hpw = 44;
+    ctx.fillStyle = 'rgba(0,0,0,.65)';
+    roundRect(ctx, x - hpw / 2 - 1, y + 21, hpw + 2, 7, 3.5);
+    ctx.fill();
+    const f = Math.max(0, u.hp / u.maxHp);
+    ctx.fillStyle = f > 0.5 ? '#5ad06a' : f > 0.25 ? '#e8c33a' : '#e05050';
+    roundRect(ctx, x - hpw / 2, y + 22, hpw * f, 5, 2.5);
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+  });
+}
+
+function drawWind() {
+  const cx = W / 2, cy = 40;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 12px "Segoe UI",sans-serif';
+  ctx.fillStyle = 'rgba(200,220,255,.55)';
+  ctx.fillText('ВЕТЕР', cx, cy - 16);
+
+  ctx.fillStyle = 'rgba(255,255,255,.10)';
+  roundRect(ctx, cx - 70, cy + 8, 140, 6, 3);
+  ctx.fill();
+
+  if (Math.abs(wind) > 0.03) {
+    const len = wind * 68;
+    ctx.strokeStyle = 'rgba(150,210,255,.95)';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy + 11);
+    ctx.lineTo(cx + len, cy + 11);
+    ctx.stroke();
+
+    const dir = Math.sign(len);
+    ctx.beginPath();
+    ctx.moveTo(cx + len, cy + 11);
+    ctx.lineTo(cx + len - dir * 9, cy + 6);
+    ctx.lineTo(cx + len - dir * 9, cy + 16);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(150,210,255,.95)';
+    ctx.fill();
+  }
+
+  ctx.font = 'bold 13px "Segoe UI",sans-serif';
+  ctx.fillStyle = 'rgba(160,200,255,.85)';
+  ctx.fillText((Math.abs(wind) * 100).toFixed(0), cx, cy + 32);
+}
+
+function drawHUD() {
+  const grd = ctx.createLinearGradient(0, 0, 0, 100);
+  grd.addColorStop(0, 'rgba(6,9,16,.88)');
+  grd.addColorStop(1, 'rgba(6,9,16,0)');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, W, 100);
+
+  drawTeamPanel(0, 42);
+  drawTeamPanel(1, W - 42);
+  drawWind();
+
+  if (state === 'over') return;
+
+  const u = currentUnit();
+  if (!u) return;
+
+  // полоса силы
+  const pw = 320, ph = 18, px = W / 2 - pw / 2, py = H - 52;
+  ctx.fillStyle = 'rgba(4,7,14,.72)';
+  roundRect(ctx, px - 4, py - 4, pw + 8, ph + 8, 12);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(140,180,255,.22)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, px - 4, py - 4, pw + 8, ph + 8, 12);
+  ctx.stroke();
+
+  const g = ctx.createLinearGradient(px, 0, px + pw, 0);
+  g.addColorStop(0,   '#4fd06a');
+  g.addColorStop(0.6, '#e8c33a');
+  g.addColorStop(1,   '#e05050');
+  ctx.fillStyle = g;
+  roundRect(ctx, px, py, pw * (aimPower / 100), ph, 9);
+  ctx.fill();
+
+  ctx.font = 'bold 12px "Segoe UI",sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(255,255,255,.9)';
+  ctx.fillText(Math.round(aimPower) + '%', px + pw / 2, py + ph / 2 + 1);
+
+  // подпись хода
+  ctx.font = 'bold 16px "Segoe UI",sans-serif';
+  ctx.fillStyle = TEAM_COLOR[u.team];
+  const label = isAITurn()
+    ? `🤖 Ход противника — ${u.icon} ${u.name}`
+    : `${u.icon} ${u.name} · ${WEAPONS[u.weapon].name}`;
+  ctx.fillText(label, W / 2, py - 26);
+
+  ctx.font = '13px "Segoe UI",sans-serif';
+  ctx.fillStyle = 'rgba(170,190,220,.6)';
+  ctx.fillText(
+    isAITurn()
+      ? 'ИИ выбирает угол и силу…'
+      : 'ЛКМ — зарядить и выстрелить · ← → сила · ↑ ↓ угол · Пробел — огонь',
+    W / 2, py + ph + 20
+  );
+}
+
+/* ---------- главный рендер ---------- */
+function render() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.save();
+  if (shake > 0.4) {
+    ctx.translate(rand(-shake, shake), rand(-shake, shake));
+  }
+
+  drawSky();
+  drawMountains();
+  if (terrainDirty) rebuildTerrain();
+  ctx.drawImage(terrCvs, 0, 0);
+
+  drawUnits();
+  drawProjectile();
+  drawEffects();
+  drawAim();
+
+  ctx.restore();
+
+  // виньетка
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.95);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,.55)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, W, H);
+
+  drawHUD();
+}
+
+/* ---------- игровой цикл ---------- */
+let lastT = 0, acc = 0;
+const STEP = 1 / 60;
+
+function loop(t) {
+  requestAnimationFrame(loop);
+
+  if (!lastT) lastT = t;
+  let dt = (t - lastT) / 1000;
+  lastT = t;
+  if (dt > 0.12) dt = 0.12;
+
+  if (gameRunning) {
+    acc += dt;
+    let guard = 0;
+    while (acc >= STEP && guard < 5) {
+      update();
+      acc -= STEP;
+      guard++;
+    }
+    if (acc > STEP) acc = 0;
+  }
+
+  render();
+}
+
+/* ---------- ввод ---------- */
+function mousePos(e) {
+  const r = cvs.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (W / r.width),
+    y: (e.clientY - r.top)  * (H / r.height)
+  };
+}
+
+cvs.addEventListener('mousemove', e => {
+  if (!gameRunning || state !== 'aim' || isAITurn()) return;
+  const u = currentUnit();
+  if (!u || !u.alive) return;
+  const m = mousePos(e);
+  aimAngle = Math.atan2(m.y - (u.y - 24), m.x - u.x);
+});
+
+cvs.addEventListener('mousedown', e => {
+  if (!gameRunning || state !== 'aim' || isAITurn()) return;
+  if (e.button !== 0) return;
+  charging = true;
+  aimPower = 0;
+});
+
+window.addEventListener('mouseup', e => {
+  if (e.button !== 0) return;
+  if (!charging) return;
+  charging = false;
+  if (state === 'aim' && !isAITurn() && aimPower > 6) fire();
+});
+
+cvs.addEventListener('contextmenu', e => e.preventDefault());
+
+window.addEventListener('keydown', e => {
+  if (!gameRunning || state !== 'aim' || isAITurn()) return;
+
+  const step = e.shiftKey ? 0.004 : 0.016;
+  switch (e.code) {
+    case 'ArrowUp':    aimAngle -= step; e.preventDefault(); break;
+    case 'ArrowDown':  aimAngle += step; e.preventDefault(); break;
+    case 'ArrowLeft':  aimPower = clamp(aimPower - (e.shiftKey ? 0.4 : 1.6), 0, 100); e.preventDefault(); break;
+    case 'ArrowRight': aimPower = clamp(aimPower + (e.shiftKey ? 0.4 : 1.6), 0, 100); e.preventDefault(); break;
+    case 'Space':
+      e.preventDefault();
+      if (aimPower > 6) fire();
+      break;
+  }
+});
+
+/* ---------- экраны ---------- */
+function showMenu() {
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <div class="panel">
+      <h1>⚔️ Герои и Орки ⚔️</h1>
+      <p class="sub">
+        Пошаговая артиллерия в мире фэнтези.<br>
+        Уничтожьте отряд противника, используя ветер, рельеф и мощь заклинаний.
+      </p>
+      <div class="btns">
+        <button id="btn-pvp">👥 Два игрока</button>
+        <button id="btn-ai">🤖 Против ИИ</button>
+      </div>
+      <p class="hint">
+        <b>Мышь</b> — прицел · <b>Зажать ЛКМ</b> — сила · <b>Отпустить</b> — выстрел<br>
+        <b>Стрелки</b> — точная настройка · <b>Пробел</b> — выстрел · <b>Shift</b> — мелкий шаг
+      </p>
+    </div>`;
+
+  document.getElementById('btn-pvp').onclick = () => startGame(false);
+  document.getElementById('btn-ai').onclick  = () => startGame(true);
+}
+
+function showGameOver(winner) {
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <div class="panel">
+      <h1 class="win">${winner === 0 ? '🏆 Победа Синих!' : '🏆 Победа Красных!'}</h1>
+      <p class="sub">Отряд противника полностью уничтожен.</p>
+      <div class="btns">
+        <button id="btn-again">⚔️ Играть снова</button>
+      </div>
+    </div>`;
+  document.getElementById('btn-again').onclick = () => {
+    overlay.classList.add('hidden');
+    showMenu();
+    gameRunning = false;
+    state = 'menu';
+  };
+}
+
+/* ---------- старт ---------- */
+function startGame(ai) {
+  vsAI = ai;
+  overlay.classList.add('hidden');
+
+  genTerrain();
+  rebuildTerrain();
+  genBackground();
+  placeUnits();
+
+  particles = [];
+  rings = [];
+  floats = [];
+  projectile = null;
+  aiPlan = null;
+  shake = 0;
+
+  turnIdx = 0;
+  wind = rand(-1, 1);
+  windForce = wind * 0.11;
+  aimAngle = -0.7;
+  aimPower = 50;
+  charging = false;
+  resolveTimer = 0;
+  state = 'aim';
+
+  gameRunning = true;
+
+  if (vsAI && currentUnit().team === 1) startAI();
+}
+
+/* ---------- инициализация ---------- */
+genBackground();
+genTerrain();
+rebuildTerrain();
+showMenu();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
